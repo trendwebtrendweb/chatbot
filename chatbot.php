@@ -30,7 +30,7 @@ if ($userMsg === '') {
 
 
 // ====== KONFIG ======
-$apiKey = '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'; // tymczasowo w kodzie
+$apiKey = $_ENV['OPENAI_API_KEY'] ?? getenv('OPENAI_API_KEY') ?? '';
 $model  = 'gpt-5'; // ewentualnie 'gpt-4o-mini' do testów
 $fallbackModel = 'gpt-4o-mini';
 $logDir = __DIR__ . '/logs/chat';
