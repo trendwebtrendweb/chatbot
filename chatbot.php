@@ -13,21 +13,10 @@ if (in_array($origin, $allowed, true)) {
 header('Vary: Origin');
 header('Access-Control-Allow-Headers: Content-Type');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { 
-    http_response_code(204); 
-    exit; 
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
+    exit;
 }
-
-// ====== WEJŚCIE ======
-$raw = file_get_contents('php://input');
-$in = json_decode($raw ?: '{}', true);
-$userMsg = trim($in['message'] ?? ($_POST['message'] ?? ''));
-if ($userMsg === '') { 
-    http_response_code(400); 
-    echo json_encode(['error'=>'Brak treści wiadomości.'], JSON_UNESCAPED_UNICODE); 
-    exit; 
-}
-
 
 // ====== KONFIG ======
 $apiKey = $_ENV['OPENAI_API_KEY'] ?? getenv('OPENAI_API_KEY') ?? '';
@@ -35,93 +24,21 @@ $model  = 'gpt-5'; // ewentualnie 'gpt-4o-mini' do testów
 $fallbackModel = 'gpt-4o-mini';
 $logDir = __DIR__ . '/logs/chat';
 $knowledgeDir = __DIR__ . '/knowledge/pages';
+$MAX_REQ_BYTES = 10000;
+$CURL_TIMEOUT = 20;
+$CURL_CONNECT_TIMEOUT = 8;
 
-
-// ====== POMOCNICZE ======
-function buttonize_links($text){
-  // 1) Zabezpiecz istniejące <a ...>...</a>, żeby ich nie przerabiać
-  $anchors = [];
-  $text = preg_replace_callback('~<a\b[^>]*>.*?</a>~is', function($m) use (&$anchors){
-    $key = '##ANCHOR'.count($anchors).'##';
-    $anchors[$key] = $m[0];
-    return $key;
-  }, $text);
-
-  // 2) Surowe URL-e → " – ZOBACZ" (bez wypisywania długiego adresu)
-  $text = preg_replace_callback('~https?://[^\s<>\)]+~i', function($m){
-    $url = htmlspecialchars(rtrim($m[0], '.,;:!?)»"'), ENT_QUOTES, 'UTF-8');
-return ' – <a class="sppb-btn-chatbot" href="'.$url.'">ZOBACZ</a>';
-  }, $text);
-
-  // 3) Po wstawionym linku zaczynaj kolejną treść od nowej linii (jeśli dalej jest tekst)
-  $text = preg_replace('~(</a>)(?=\s*\S)~', "$1\n", $text);
-
-  // 4) Przywróć oryginalne <a>
-  return $anchors ? strtr($text, $anchors) : $text;
-}
-
-// ====== MINI-PAMIĘĆ (cookie) ======
-function mini_ctx_read(): array {
-  $raw = $_COOKIE['chat_ctx'] ?? '';
-  if ($raw === '') return [];
-  $arr = json_decode($raw, true);
-  if (!is_array($arr)) return [];
-  // tylko ostatnie 3 wymiany, bez pustych
-  $out = [];
-  foreach ($arr as $p) {
-    $u = isset($p['u']) ? (string)$p['u'] : '';
-    $b = isset($p['b']) ? (string)$p['b'] : '';
-    if ($u !== '' || $b !== '') $out[] = ['u'=>$u, 'b'=>$b];
-  }
-  return array_slice($out, -3);
-}
-
-function mini_ctx_write(array $ctx): void {
-  // ostatnie 3 + przycięcie, żeby zmieścić się w limicie ciasteczka (~4 KB)
-  $ctx = array_slice($ctx, -3);
-  $safe = [];
-  foreach ($ctx as $p) {
-    $u = mb_substr((string)($p['u'] ?? ''), 0, 300, 'UTF-8');
-    $b = mb_substr((string)($p['b'] ?? ''), 0, 700, 'UTF-8');
-    $safe[] = ['u'=>$u, 'b'=>$b];
-  }
-  $payload = json_encode($safe, JSON_UNESCAPED_UNICODE);
-
-  $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
-  setcookie('chat_ctx', $payload, [
-    'expires'  => time() + 3600, // 1h
-    'path'     => '/',           // widoczne na całej stronie
-    'secure'   => $secure,       // true przy HTTPS
-    'httponly' => false,         // JS musi móc czytać
-    'samesite' => 'Lax',         // działa przy normalnej nawigacji
-  ]);
-}
-
-function mini_ctx_append(array $ctx, string $u, string $b): array {
-  $ctx[] = ['u'=>$u, 'b'=>$b];
-  return array_slice($ctx, -3);
-}
-
-function mini_ctx_to_text(array $ctx): string {
-  if (!$ctx) return '';
-  $lines = [];
-  foreach ($ctx as $p) {
-    $lines[] = "U: ".$p['u'];
-    $lines[] = "B: ".$p['b'];
-  }
-  return "Kontekst (ostatnie 3 wymiany):\n".implode("\n", $lines)."\n---\n";
-}
-
-function logLine($dir, $role, $text){
-  @mkdir($dir, 0775, true);
-  $line = date('Y-m-d H:i:s') . " | [$role] " . $text . PHP_EOL;
-  @file_put_contents($dir . '/' . date('Y-m-d') . '.txt', $line, FILE_APPEND);
-}
+require_once __DIR__ . '/helpers.php';
 
 // ====== WEJŚCIE ======
 $raw = file_get_contents('php://input');
+if ($raw !== false && strlen($raw) > $MAX_REQ_BYTES) {
+  http_response_code(413);
+  echo json_encode(['error'=>'Żądanie jest zbyt duże.'], JSON_UNESCAPED_UNICODE);
+  exit;
+}
 $in = json_decode($raw ?: '{}', true);
-$userMsg = trim($in['message'] ?? '');
+$userMsg = trim($in['message'] ?? ($_POST['message'] ?? ''));
 if ($userMsg === '') {
   http_response_code(400);
   echo json_encode(['error'=>'Brak treści wiadomości.'], JSON_UNESCAPED_UNICODE);
@@ -140,66 +57,6 @@ logLine($logDir, 'user', $userMsg);
 $miniCtx = mini_ctx_read();
 
 // ====== RAG v2: dopasowanie i snippety ======
-function t_lower($s){ return mb_strtolower($s ?? '', 'UTF-8'); }
-function t_tokens($s){
-  $s = t_lower(preg_replace('/[^\p{L}\p{N}\s]+/u',' ',$s));
-  return array_values(array_filter(preg_split('/\s+/u',$s), fn($w)=>mb_strlen($w)>=3));
-}
-function kb_load($dir){
-  $files = glob($dir.'/*.txt') ?: [];
-  $docs = [];
-  foreach ($files as $f){
-    $raw = @file_get_contents($f); if(!$raw) continue;
-    $url = null; $body = $raw;
-    if (preg_match('/^URL:\s*(.+)\RFetched:.*\R----\R/um',$raw,$m)) { $url=trim($m[1]); $body=substr($raw, strlen($m[0])); }
-    elseif (preg_match('/^URL:\s*(.+)\R----\R/um',$raw,$m))        { $url=trim($m[1]); $body=substr($raw, strlen($m[0])); }
-    $docs[] = [
-      'name'=>t_lower(basename($f)),
-      'url' =>$url,
-      'text'=>$body,
-      'intro'=>mb_substr($body,0,1200,'UTF-8'),
-    ];
-  }
-  return $docs;
-}
-function score_doc($doc, $qTokens){
-  $low = t_lower($doc['text']);
-  $score = 0.0;
-  foreach ($qTokens as $w){ $score += min(3, substr_count($low, $w)); }
-  if (str_contains($doc['name'],'cennik') || str_contains($doc['name'],'cena') || str_contains($doc['name'],'koszt')) $score += 1.5;
-  $introLow = t_lower($doc['intro']);
-  foreach ($qTokens as $w){ if (mb_stripos($introLow,$w,0,'UTF-8')!==false){ $score += 0.25; break; } }
-  return $score;
-}
-function split_sentences($txt){
-  $txt = preg_replace('/\s+/u',' ', trim($txt));
-  $parts = preg_split('/(?<=[\.\?\!])\s+/u', $txt);
-  return array_values(array_filter($parts, fn($s)=> $s!=='' && !preg_match('/^\s*[-•*]/u',$s)));
-}
-function snippet_from($text, $qTokens, $maxCh){
-  $sents = split_sentences($text);
-  if (!$sents) return mb_substr($text,0,$maxCh,'UTF-8');
-  $hit = 0;
-  foreach ($sents as $i=>$s){
-    $l = t_lower($s);
-    foreach ($qTokens as $w){ if (mb_stripos($l,$w,0,'UTF-8')!==false){ $hit=$i; break 2; } }
-  }
-  $pick = $sents[$hit] ?? '';
-  $next = ($sents[$hit+1] ?? '');
-  $snip = trim($pick.($next ? ' '.$next : ''));
-  if (mb_strlen($snip,'UTF-8') > $maxCh) $snip = mb_substr($snip,0,$maxCh,'UTF-8');
-  return $snip;
-}
-function price_lines($text, $maxCh){
-  $lines = preg_split('/\R/u', $text); $picked=[];
-  foreach ($lines as $ln){
-    if (preg_match('/(\d[\d\s\.,]{1,10})\s*(zł|pln)/iu',$ln) || preg_match('/\d{1,3}(\.\d{3}|\s\d{3})*(,\d{2})?/u',$ln)){
-      $picked[] = trim($ln);
-    }
-    if (mb_strlen(implode(" ",$picked),'UTF-8') > $maxCh) break;
-  }
-  return $picked ? implode("\n", $picked) : snippet_from($text, [], $maxCh);
-}
 
 // Parametry RAG
 $MATCH_THRESHOLD = 4.0;
@@ -378,8 +235,8 @@ curl_setopt_array($ch, [
   ],
   CURLOPT_POST           => true,
   CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
-  CURLOPT_TIMEOUT        => 20,
-  CURLOPT_CONNECTTIMEOUT => 8,
+  CURLOPT_TIMEOUT        => $CURL_TIMEOUT,
+  CURLOPT_CONNECTTIMEOUT => $CURL_CONNECT_TIMEOUT,
 ]);
 
 $res  = curl_exec($ch);
@@ -428,8 +285,8 @@ if ($res === false && $eno === 28) {
     ],
     CURLOPT_POST           => true,
     CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
-    CURLOPT_TIMEOUT        => 20,
-    CURLOPT_CONNECTTIMEOUT => 8,
+    CURLOPT_TIMEOUT        => $CURL_TIMEOUT,
+    CURLOPT_CONNECTTIMEOUT => $CURL_CONNECT_TIMEOUT,
     CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
     CURLOPT_NOSIGNAL       => true,
   ]);
