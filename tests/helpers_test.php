@@ -30,5 +30,6 @@ if (strpos($snip, 'Drugie zdanie') === false) {
     throw new Exception('snippet_from failed');
 }
 
+
 echo "All tests passed\n";
 ?>

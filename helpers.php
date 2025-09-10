@@ -73,6 +73,7 @@ function logLine(string $dir, string $role, string $text): void {
   }
 }
 
+
 // === RAG helpers ===
 function t_lower($s){ return mb_strtolower($s ?? '', 'UTF-8'); }
 
