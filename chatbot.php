@@ -317,7 +317,7 @@ $reply = $data['choices'][0]['message']['content'] ?? 'Brak odpowiedzi.';
 
 
 // --- REALIZACJE: twarde wstawianie z JSON (bez AI) ---
-if (preg_match('/realizac|portfolio|wykonane|projekty|prace|case|wdrożen|więcej|inne|kolejne/i', $user_msg)) {
+if (preg_match('/realizac|portfolio|wykonane|projekty|prace|case|wdrożen|więcej|inne|kolejne/i', $userMsg)) {
     $json = __DIR__ . '/realizacje_czyste.json';
     $list = @json_decode(@file_get_contents($json), true);
 
