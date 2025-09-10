@@ -30,15 +30,6 @@ if (strpos($snip, 'Drugie zdanie') === false) {
     throw new Exception('snippet_from failed');
 }
 
-// Test sanitize_api_error
-$msg = sanitize_api_error('Incorrect API key provided: sk-test1234567890');
-if ($msg !== 'Błędny klucz API.') {
-    throw new Exception('sanitize_api_error failed on incorrect key');
-}
-$msg2 = sanitize_api_error('Other sk-secret');
-if ($msg2 !== 'Other [redacted]') {
-    throw new Exception('sanitize_api_error failed on redaction');
-}
 
 echo "All tests passed\n";
 ?>

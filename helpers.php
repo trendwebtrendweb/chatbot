@@ -73,12 +73,6 @@ function logLine(string $dir, string $role, string $text): void {
   }
 }
 
-function sanitize_api_error(string $msg): string {
-  if (stripos($msg, 'incorrect api key') !== false) {
-    return 'Błędny klucz API.';
-  }
-  return preg_replace('/sk-[A-Za-z0-9]+/', '[redacted]', $msg);
-}
 
 // === RAG helpers ===
 function t_lower($s){ return mb_strtolower($s ?? '', 'UTF-8'); }
